@@ -1,0 +1,478 @@
+name: Recover Pages from signed snapshot
+
+on:
+  workflow_dispatch:
+    inputs:
+      snapshot_tag:
+        description: Exact newest archive-snapshot-RUN-ATTEMPT tag to recover
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: sandbox-archive-publish
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Verify recovery snapshot
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Check out publisher repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install recovery tools
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates curl dpkg-dev gnupg jq python3 reprepro
+          sudo ./scripts/install-gh.sh
+
+      - name: Verify signed snapshot without changing Pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SNAPSHOT_TAG: ${{ inputs.snapshot_tag }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "Grippy98/ti-debpkgs-sandbox"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_WORKFLOW_REF" = \
+            "$GITHUB_REPOSITORY/.github/workflows/recover-pages.yml@$GITHUB_REF"
+          test "$GITHUB_SHA" = "$(git rev-parse HEAD)"
+          ./scripts/restore-release-snapshot.sh \
+            policy/archive.json "$SNAPSHOT_TAG" "$RUNNER_TEMP/recovery-plan"
+          {
+            echo "### Pages recovery plan"
+            echo
+            echo "- Verified snapshot: \`$SNAPSHOT_TAG\`"
+            echo "- Release draft: \`$(jq -r '.draft' "$RUNNER_TEMP/recovery-plan/release.json")\`"
+            echo "- Publisher commit: \`$(jq -r '.publisher.commit' "$RUNNER_TEMP/recovery-plan/assets/snapshot.json")\`"
+            echo "- Request: \`$(jq -r '.request_id' "$RUNNER_TEMP/recovery-plan/assets/snapshot.json")\`"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  stage:
+    name: Approve and stage recovered Pages
+    needs: plan
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    environment: sandbox-publish
+    permissions:
+      artifact-metadata: write
+      contents: read
+    outputs:
+      pages_artifact_name: ${{ steps.identity.outputs.pages_artifact_name }}
+      release_id: ${{ steps.identity.outputs.release_id }}
+      snapshot_tag: ${{ steps.identity.outputs.snapshot_tag }}
+    steps:
+      - name: Check out publisher repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install recovery tools
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates curl dpkg-dev gnupg jq python3 reprepro
+          sudo ./scripts/install-gh.sh
+
+      - name: Re-verify signed snapshot after approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SNAPSHOT_TAG: ${{ inputs.snapshot_tag }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "Grippy98/ti-debpkgs-sandbox"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_WORKFLOW_REF" = \
+            "$GITHUB_REPOSITORY/.github/workflows/recover-pages.yml@$GITHUB_REF"
+          test "$GITHUB_SHA" = "$(git rev-parse HEAD)"
+          ./scripts/restore-release-snapshot.sh \
+            policy/archive.json "$SNAPSHOT_TAG" "$RUNNER_TEMP/recovery"
+
+      - name: Establish immutable recovery artifact identity
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "pages_artifact_name=github-pages-recovery-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            echo "release_id=$(jq -er '
+              .id | select(type == "number" and . >= 1 and floor == .)
+            ' "$RUNNER_TEMP/recovery/release.json")"
+            echo "snapshot_tag=$(jq -er '.tag_name' "$RUNNER_TEMP/recovery/release.json")"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Upload recovered GitHub Pages artifact
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
+        with:
+          name: ${{ steps.identity.outputs.pages_artifact_name }}
+          path: ${{ runner.temp }}/recovery/pages
+
+  deploy:
+    name: Deploy recovered archive to Pages
+    needs: stage
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      id-token: write
+      pages: write
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
+        with:
+          artifact_name: ${{ needs.stage.outputs.pages_artifact_name }}
+
+  finalize:
+    name: Reconcile release and deployed head
+    needs: [stage, deploy]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Check out publisher repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install finalization verification tools
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates curl gnupg jq
+          sudo ./scripts/install-gh.sh
+
+      - name: Confirm Pages and publish draft if needed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLICATION_URL: ${{ needs.deploy.outputs.page_url }}
+          RELEASE_ID: ${{ needs.stage.outputs.release_id }}
+          SNAPSHOT_TAG: ${{ needs.stage.outputs.snapshot_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/recovery-finalize"
+          test "$GITHUB_SHA" = "$(git rev-parse HEAD)"
+          snapshot_limit=$(jq -er '.limits.snapshot_bytes' policy/archive.json)
+          metadata_limit=$(jq -er '.limits.snapshot_metadata_bytes' policy/archive.json)
+
+          release_identity() {
+            jq -S '{
+              id,
+              tag_name,
+              target_commitish,
+              draft,
+              prerelease,
+              assets: (
+                .assets
+                | sort_by(.name, .id)
+                | map({id, name, size, digest, state})
+              )
+            }' "$1"
+          }
+
+          download_initial_snapshot() {
+            local destination=$1
+            local asset asset_id expected_size expected_digest
+            test ! -e "$destination"
+            mkdir -p "$destination"
+            gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+              >"$destination/release.json"
+            jq -e \
+              --argjson id "$RELEASE_ID" \
+              --arg tag "$SNAPSHOT_TAG" '
+                .id == $id and .tag_name == $tag and
+                (.target_commitish | test("^[0-9a-f]{40}$")) and
+                .prerelease == false and (.draft | type == "boolean")
+              ' "$destination/release.json" >/dev/null
+            asset=$(jq -cer '
+              [.assets[] | select(.name == "snapshot.json")]
+              | if length == 1 and .[0].state == "uploaded" then .[0]
+                else error("snapshot.json is missing, duplicated, or incomplete")
+                end
+            ' "$destination/release.json")
+            asset_id=$(jq -er '
+              .id | select(type == "number" and . >= 1 and floor == .)
+            ' <<<"$asset")
+            expected_size=$(jq -er --argjson limit "$metadata_limit" '
+              .size
+              | select(type == "number" and . >= 1 and . <= $limit and floor == .)
+            ' <<<"$asset")
+            expected_digest=$(jq -er '
+              .digest | select(test("^sha256:[0-9a-f]{64}$"))
+            ' <<<"$asset")
+            gh api --method GET --header 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+              >"$destination/snapshot.json"
+            test "$(stat -c %s "$destination/snapshot.json")" -eq "$expected_size"
+            test "sha256:$(sha256sum "$destination/snapshot.json" | awk '{print $1}')" = \
+              "$expected_digest"
+          }
+
+          verify_release_assets() {
+            local destination=$1
+            local name limit asset asset_id expected_size expected_digest
+            local receipt_size receipt_digest expected_commit
+            test ! -e "$destination"
+            mkdir -p "$destination"
+            gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+              >"$destination/release.json"
+            jq -e \
+              --argjson id "$RELEASE_ID" \
+              --arg tag "$SNAPSHOT_TAG" '
+                .id == $id and .tag_name == $tag and
+                (.target_commitish | test("^[0-9a-f]{40}$")) and
+                .prerelease == false and (.draft | type == "boolean") and
+                ([.assets[].name] | sort == [
+                  "SHA256SUMS",
+                  "archive-state.tar.gz",
+                  "receipt.json",
+                  "snapshot.json",
+                  "snapshot.json.asc"
+                ])
+              ' "$destination/release.json" >/dev/null
+
+            for name in \
+              archive-state.tar.gz \
+              receipt.json \
+              snapshot.json \
+              snapshot.json.asc \
+              SHA256SUMS; do
+              if [ "$name" = archive-state.tar.gz ]; then
+                limit=$snapshot_limit
+              else
+                limit=$metadata_limit
+              fi
+              asset=$(jq -cer --arg name "$name" '
+                [.assets[] | select(.name == $name)]
+                | if length == 1 and .[0].state == "uploaded" then .[0]
+                  else error("release asset is missing, duplicated, or incomplete")
+                  end
+              ' "$destination/release.json")
+              asset_id=$(jq -er '
+                .id | select(type == "number" and . >= 1 and floor == .)
+              ' <<<"$asset")
+              expected_size=$(jq -er --argjson limit "$limit" '
+                .size
+                | select(type == "number" and . >= 1 and . <= $limit and floor == .)
+              ' <<<"$asset")
+              expected_digest=$(jq -er '
+                .digest | select(test("^sha256:[0-9a-f]{64}$"))
+              ' <<<"$asset")
+              gh api --method GET --header 'Accept: application/octet-stream' \
+                "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+                >"$destination/$name"
+              test "$(stat -c %s "$destination/$name")" -eq "$expected_size"
+              test "sha256:$(sha256sum "$destination/$name" | awk '{print $1}')" = \
+                "$expected_digest"
+            done
+
+            (
+              cd "$destination"
+              test "$(wc -l <SHA256SUMS)" -eq 4
+              test "$(awk '{print $2}' SHA256SUMS | LC_ALL=C sort | tr '\n' ' ')" = \
+                'archive-state.tar.gz receipt.json snapshot.json snapshot.json.asc '
+              sha256sum --check --strict SHA256SUMS
+            )
+            ./scripts/verify-snapshot-metadata.sh \
+              "$destination/archive-state.tar.gz" "$destination/snapshot.json" \
+              "$destination/snapshot.json.asc" "$SNAPSHOT_TAG" policy/archive.json
+            expected_commit=$(jq -er '.publisher.commit' "$destination/snapshot.json")
+            test "$(jq -er '.target_commitish' "$destination/release.json")" = \
+              "$expected_commit"
+            receipt_size=$(jq -er '.receipt.size' "$destination/snapshot.json")
+            receipt_digest=$(jq -er '.receipt.sha256' "$destination/snapshot.json")
+            test "$(stat -c %s "$destination/receipt.json")" -eq "$receipt_size"
+            test "$(sha256sum "$destination/receipt.json" | awk '{print $1}')" = \
+              "$receipt_digest"
+            test "$(jq -er '.request_id' "$destination/receipt.json")" = \
+              "$(jq -er '.request_id' "$destination/snapshot.json")"
+
+            gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+              >"$destination/release-current.json"
+            release_identity "$destination/release.json" \
+              >"$destination/release-identity.json"
+            release_identity "$destination/release-current.json" \
+              >"$destination/release-current-identity.json"
+            cmp "$destination/release-identity.json" \
+              "$destination/release-current-identity.json"
+
+            gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              >"$destination/releases.json"
+            test "$(jq -er --arg tag "$SNAPSHOT_TAG" '
+              [.[][] | select(.prerelease == false and .tag_name == $tag)]
+              | length
+            ' "$destination/releases.json")" -eq 1
+            jq -e \
+              --arg tag "$SNAPSHOT_TAG" \
+              --argjson id "$RELEASE_ID" '
+                first(
+                  .[][]
+                  | select(.prerelease == false)
+                  | select(.tag_name | startswith("archive-snapshot-"))
+                  | {id: .id, tag: .tag_name}
+                )
+                | .tag == $tag and .id == $id
+              ' "$destination/releases.json" >/dev/null
+          }
+
+          download_initial_snapshot "$RUNNER_TEMP/recovery-finalize/initial-assets"
+          matched=false
+          for attempt in 1 2 3 4 5 6; do
+            if curl --fail --location --silent --show-error \
+              --header 'Cache-Control: no-cache' \
+              --max-filesize 1048576 \
+              --output "$RUNNER_TEMP/recovery-finalize/pages-snapshot.json" \
+              "${PUBLICATION_URL%/}/snapshot.json?head=${SNAPSHOT_TAG}-${GITHUB_RUN_ATTEMPT}-${attempt}" && \
+              cmp "$RUNNER_TEMP/recovery-finalize/initial-assets/snapshot.json" \
+                "$RUNNER_TEMP/recovery-finalize/pages-snapshot.json"; then
+              matched=true
+              break
+            fi
+            if [ "$attempt" -lt 6 ]; then
+              sleep 10
+            fi
+          done
+          test "$matched" = true
+          verify_release_assets "$RUNNER_TEMP/recovery-finalize/prepublish-assets"
+          cmp "$RUNNER_TEMP/recovery-finalize/pages-snapshot.json" \
+            "$RUNNER_TEMP/recovery-finalize/prepublish-assets/snapshot.json"
+          expected_commit=$(jq -er '.publisher.commit' \
+            "$RUNNER_TEMP/recovery-finalize/prepublish-assets/snapshot.json")
+          is_draft=$(jq -r '.draft' \
+            "$RUNNER_TEMP/recovery-finalize/prepublish-assets/release-current.json")
+          if [ "$is_draft" = true ]; then
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+              -F draft=false >/dev/null
+          else
+            test "$is_draft" = false
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            >"$RUNNER_TEMP/recovery-finalize/published-release.json"
+          jq -e \
+            --argjson id "$RELEASE_ID" \
+            --arg tag "$SNAPSHOT_TAG" \
+            --arg target "$expected_commit" '
+            .id == $id and .tag_name == $tag and
+            .target_commitish == $target and
+            .draft == false and .prerelease == false
+          ' "$RUNNER_TEMP/recovery-finalize/published-release.json" >/dev/null
+          tag_verified=false
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$SNAPSHOT_TAG" \
+              >"$RUNNER_TEMP/recovery-finalize/tag.json" 2>/dev/null && \
+              jq -e --arg commit "$expected_commit" '
+                .object.type == "commit" and .object.sha == $commit
+              ' "$RUNNER_TEMP/recovery-finalize/tag.json" >/dev/null; then
+              tag_verified=true
+              break
+            fi
+            sleep 2
+          done
+          test "$tag_verified" = true
+
+  smoke:
+    name: Verify recovered APT archive
+    needs: [stage, finalize, deploy]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out publisher repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install APT verification tools
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ca-certificates gnupg jq
+
+      - name: Verify recovered signed archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLICATION_URL: ${{ needs.deploy.outputs.page_url }}
+          RELEASE_ID: ${{ needs.stage.outputs.release_id }}
+          SNAPSHOT_TAG: ${{ needs.stage.outputs.snapshot_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/recovery-smoke"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            >"$RUNNER_TEMP/recovery-smoke/release.json"
+          jq -e --argjson id "$RELEASE_ID" --arg tag "$SNAPSHOT_TAG" '
+            .id == $id and .tag_name == $tag and
+            .draft == false and .prerelease == false
+          ' "$RUNNER_TEMP/recovery-smoke/release.json" >/dev/null
+          for name in receipt.json snapshot.json; do
+            asset_id=$(jq -er --arg name "$name" '
+              [.assets[] | select(.name == $name)]
+              | if length == 1 then
+                  .[0]
+                  | select(
+                      .state == "uploaded" and
+                      (.id | type == "number" and . >= 1 and floor == .)
+                    )
+                  | .id
+                else error("release asset is missing or duplicated")
+                end
+            ' "$RUNNER_TEMP/recovery-smoke/release.json")
+            gh api --header 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+              >"$RUNNER_TEMP/recovery-smoke/$name"
+          done
+          receipt_size=$(jq -er '.receipt.size' \
+            "$RUNNER_TEMP/recovery-smoke/snapshot.json")
+          receipt_digest=$(jq -er '.receipt.sha256' \
+            "$RUNNER_TEMP/recovery-smoke/snapshot.json")
+          test "$(stat -c %s "$RUNNER_TEMP/recovery-smoke/receipt.json")" -eq \
+            "$receipt_size"
+          test "$(sha256sum "$RUNNER_TEMP/recovery-smoke/receipt.json" | \
+            awk '{print $1}')" = "$receipt_digest"
+          test "$(jq -er '.request_id' \
+            "$RUNNER_TEMP/recovery-smoke/receipt.json")" = \
+            "$(jq -er '.request_id' \
+              "$RUNNER_TEMP/recovery-smoke/snapshot.json")"
+          for attempt in 1 2 3 4 5 6; do
+            if curl --fail --location --silent --show-error \
+              --header 'Cache-Control: no-cache' \
+              --max-filesize 1048576 \
+              --output "$RUNNER_TEMP/recovery-smoke/pages-snapshot.json" \
+              "${PUBLICATION_URL%/}/snapshot.json?head=${SNAPSHOT_TAG}-${GITHUB_RUN_ATTEMPT}-${attempt}" && \
+              cmp "$RUNNER_TEMP/recovery-smoke/snapshot.json" \
+                "$RUNNER_TEMP/recovery-smoke/pages-snapshot.json" && \
+              ./scripts/smoke-test.sh \
+                "${PUBLICATION_URL%/}/" archive/keys/sandbox-archive.asc \
+                "$RUNNER_TEMP/recovery-smoke/receipt.json"; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 6 ]; then
+              sleep 10
+            fi
+          done
+          echo "Recovered archive did not pass deployed verification" >&2
+          exit 1

@@ -1,0 +1,57 @@
+#!/bin/bash
+
+set -euo pipefail
+
+: "${MOCK_CURL_LOG:?MOCK_CURL_LOG is required}"
+: "${MOCK_EXPECT_TOKEN:?MOCK_EXPECT_TOKEN is required}"
+: "${MOCK_EXPECT_ARTIFACT_URL:?MOCK_EXPECT_ARTIFACT_URL is required}"
+: "${MOCK_TRANSPORT:?MOCK_TRANSPORT is required}"
+
+{
+    printf 'curl'
+    printf ' %q' "$@"
+    printf '\n'
+} >>"$MOCK_CURL_LOG"
+
+arguments=("$@")
+config=
+output=
+for ((index = 0; index < ${#arguments[@]}; index++)); do
+    case "${arguments[$index]}" in
+        --config)
+            index=$((index + 1))
+            config=${arguments[$index]}
+            ;;
+        --output)
+            index=$((index + 1))
+            output=${arguments[$index]}
+            ;;
+    esac
+done
+
+if [ -n "${GH_TOKEN:-}" ]; then
+    echo "fetch-candidate exposed GH_TOKEN to curl's environment" >&2
+    exit 94
+fi
+if [ -z "$config" ] || [ ! -f "$config" ]; then
+    echo "curl mock did not receive a token configuration file" >&2
+    exit 94
+fi
+if [ "$(stat -c %a "$config")" != 600 ]; then
+    echo "curl token configuration is not mode 0600" >&2
+    exit 94
+fi
+if ! grep -Fxq "header = \"Authorization: Bearer $MOCK_EXPECT_TOKEN\"" "$config"; then
+    echo "curl token configuration does not contain the expected bearer token" >&2
+    exit 94
+fi
+if [ "${arguments[${#arguments[@]} - 1]}" != "$MOCK_EXPECT_ARTIFACT_URL" ]; then
+    echo "curl artifact URL is not exactly pinned" >&2
+    exit 94
+fi
+if [ -z "$output" ]; then
+    echo "curl mock did not receive an output path" >&2
+    exit 94
+fi
+
+cp "${MOCK_CURL_TRANSPORT:-$MOCK_TRANSPORT}" "$output"

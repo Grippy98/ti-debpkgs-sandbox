@@ -1,0 +1,10 @@
+Origin: TI Debian Packages Sandbox
+Label: TI Debian Packages Sandbox
+Codename: trixie
+Suite: trixie
+Architectures: source arm64
+Components: main
+Description: Disposable TI Debian package publication sandbox
+SignWith: @SIGNING_FINGERPRINT@
+DebIndices: Packages Release . .gz .xz
+Tracking: minimal includechanges includebuildinfos keepsources

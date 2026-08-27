@@ -1,0 +1,24 @@
+{
+  "schema": "ti.debpkgs.request/v1",
+  "request_id": "2026-08-27-cc33conf-example",
+  "action": "include",
+  "suite": "trixie",
+  "component": "main",
+  "reason": "Publish the first attested cc33conf sandbox candidate",
+  "source": {
+    "name": "cc33conf",
+    "version": "1.7.0.120+git20241031+34e2cf44-1",
+    "upstream_repository": "https://git.ti.com/git/cc33xx-wlan/cc33xx-utils.git",
+    "upstream_commit": "34e2cf44e9468bb6308bf163da4cf7349f1717ec"
+  },
+  "candidate": {
+    "run_id": 123456789,
+    "run_attempt": 1,
+    "artifact_id": 987654321,
+    "artifact_name": "cc33conf-candidate-example",
+    "artifact_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "bundle": "candidate-cc33conf-trixie-example.tar.gz",
+    "bundle_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "producer_commit": "0000000000000000000000000000000000000000"
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://grippy98.github.io/ti-debpkgs-sandbox/schemas/publication-request.schema.json",
+  "title": "TI Debian publication request",
+  "oneOf": [
+    {"$ref": "#/$defs/include"},
+    {"$ref": "#/$defs/removeSource"}
+  ],
+  "$defs": {
+    "base": {
+      "type": "object",
+      "required": ["schema", "request_id", "action", "suite", "component", "reason"],
+      "properties": {
+        "schema": {"const": "ti.debpkgs.request/v1"},
+        "request_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,79}$"},
+        "action": {"enum": ["include", "remove-source"]},
+        "suite": {"type": "string"},
+        "component": {"type": "string"},
+        "reason": {"type": "string", "minLength": 3, "maxLength": 500}
+      }
+    },
+    "include": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["candidate", "source"],
+          "properties": {
+            "schema": true,
+            "request_id": true,
+            "action": {"const": "include"},
+            "suite": true,
+            "component": true,
+            "reason": true,
+            "source": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "version", "upstream_repository", "upstream_commit"],
+              "properties": {
+                "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$"},
+                "version": {"type": "string", "minLength": 1},
+                "upstream_repository": {"type": "string", "format": "uri", "pattern": "^https://"},
+                "upstream_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+              }
+            },
+            "candidate": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["run_id", "run_attempt", "artifact_id", "artifact_name", "artifact_digest", "bundle", "bundle_sha256", "producer_commit"],
+              "properties": {
+                "run_id": {"type": "integer", "minimum": 1},
+                "run_attempt": {"type": "integer", "minimum": 1},
+                "artifact_id": {"type": "integer", "minimum": 1},
+                "artifact_name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]+$"},
+                "artifact_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                "bundle": {"type": "string", "pattern": "^candidate-[A-Za-z0-9._-]+\\.tar\\.gz$"},
+                "bundle_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "producer_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "removeSource": {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source"],
+          "properties": {
+            "schema": true,
+            "request_id": true,
+            "action": {"const": "remove-source"},
+            "suite": true,
+            "component": true,
+            "reason": true,
+            "source": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "version"],
+              "properties": {
+                "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9+.-]+$"},
+                "version": {"type": "string", "minLength": 1}
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,140 @@
+#!/bin/bash
+
+set -euo pipefail
+
+: "${MOCK_GH_LOG:?MOCK_GH_LOG is required}"
+
+{
+    printf 'gh'
+    printf ' %q' "$@"
+    printf '\n'
+} >>"$MOCK_GH_LOG"
+
+if [ "${1:-}" = --version ]; then
+    printf 'gh version %s (mock)\n' "${MOCK_GH_VERSION:-2.98.0}"
+    exit 0
+fi
+
+if [ "${1:-}" = api ]; then
+    endpoint=${*: -1}
+    case "$endpoint" in
+        */actions/runs/*/attempts/*)
+            jq -n \
+                --argjson id "${MOCK_RUN_ID_RETURNED:-$MOCK_EXPECT_RUN_ID}" \
+                --argjson attempt "${MOCK_RUN_ATTEMPT_RETURNED:-$MOCK_EXPECT_RUN_ATTEMPT}" \
+                --arg status "${MOCK_RUN_STATUS:-completed}" \
+                --arg conclusion "${MOCK_RUN_CONCLUSION:-success}" \
+                --arg repository "${MOCK_RUN_REPOSITORY:-$MOCK_EXPECT_REPOSITORY}" \
+                --arg commit "${MOCK_RUN_COMMIT:-$MOCK_EXPECT_COMMIT}" \
+                --arg path "${MOCK_RUN_PATH:-$MOCK_EXPECT_WORKFLOW@$MOCK_EXPECT_REF}" \
+                --arg event "${MOCK_RUN_EVENT:-workflow_dispatch}" \
+                --arg branch "${MOCK_RUN_BRANCH:-$MOCK_EXPECT_BRANCH}" \
+                '{
+                    id: $id,
+                    run_attempt: $attempt,
+                    status: $status,
+                    conclusion: $conclusion,
+                    head_repository: {full_name: $repository},
+                    head_sha: $commit,
+                    path: $path,
+                    event: $event,
+                    head_branch: $branch
+                }'
+            exit 0
+            ;;
+        */actions/artifacts/*)
+            jq -n \
+                --argjson id "${MOCK_ARTIFACT_ID_RETURNED:-$MOCK_EXPECT_ARTIFACT_ID}" \
+                --arg name "${MOCK_ARTIFACT_NAME_RETURNED:-$MOCK_EXPECT_ARTIFACT_NAME}" \
+                --argjson expired "${MOCK_ARTIFACT_EXPIRED:-false}" \
+                --arg digest "${MOCK_ARTIFACT_DIGEST_RETURNED:-$MOCK_EXPECT_ARTIFACT_DIGEST}" \
+                --argjson run_id "${MOCK_ARTIFACT_RUN_ID_RETURNED:-$MOCK_EXPECT_RUN_ID}" \
+                --argjson size "${MOCK_ARTIFACT_SIZE_RETURNED:-$(stat -c %s "$MOCK_TRANSPORT")}" \
+                '{
+                    id: $id,
+                    name: $name,
+                    expired: $expired,
+                    digest: $digest,
+                    workflow_run: {id: $run_id},
+                    size_in_bytes: $size
+                }'
+            exit 0
+            ;;
+        *)
+            echo "Unexpected mocked gh api endpoint: $endpoint" >&2
+            exit 97
+            ;;
+    esac
+fi
+
+if [ "${1:-}" = attestation ] && [ "${2:-}" = verify ]; then
+    expected=(
+        attestation verify "$MOCK_EXPECT_BUNDLE"
+        --repo "$MOCK_EXPECT_REPOSITORY"
+        --predicate-type https://slsa.dev/provenance/v1
+        --signer-workflow "$MOCK_EXPECT_REPOSITORY/$MOCK_EXPECT_WORKFLOW"
+        --source-ref "$MOCK_EXPECT_REF"
+        --source-digest "$MOCK_EXPECT_COMMIT"
+        --signer-digest "$MOCK_EXPECT_COMMIT"
+        --deny-self-hosted-runners
+        --format json
+    )
+    actual=("$@")
+    if [ "${#actual[@]}" -ne "${#expected[@]}" ]; then
+        echo "Attestation verifier argument count is not exactly pinned" >&2
+        exit 98
+    fi
+    for index in "${!expected[@]}"; do
+        if [ "${actual[$index]}" != "${expected[$index]}" ]; then
+            printf 'Attestation verifier argument %s differs: expected %q, got %q\n' \
+                "$index" "${expected[$index]}" "${actual[$index]}" >&2
+            exit 98
+        fi
+    done
+
+    mode=${MOCK_ATTESTATION_MODE:-valid}
+    invocation="https://github.com/$MOCK_EXPECT_REPOSITORY/actions/runs/$MOCK_EXPECT_RUN_ID/attempts/$MOCK_EXPECT_RUN_ATTEMPT"
+    case "$mode" in
+        valid)
+            jq -n --arg expected "$invocation" \
+                '[
+                    {
+                        verificationResult: {
+                            signature: {certificate: {runInvocationURI: "https://github.com/example/wrong/actions/runs/1/attempts/1"}}
+                        }
+                    },
+                    {
+                        verificationResult: {
+                            signature: {certificate: {runInvocationURI: $expected}}
+                        }
+                    }
+                ]'
+            ;;
+        wrong-run)
+            wrong="https://github.com/$MOCK_EXPECT_REPOSITORY/actions/runs/$((MOCK_EXPECT_RUN_ID + 1))/attempts/$MOCK_EXPECT_RUN_ATTEMPT"
+            jq -n --arg invocation "$wrong" \
+                '[{verificationResult: {signature: {certificate: {runInvocationURI: $invocation}}}}]'
+            ;;
+        wrong-run-attempt)
+            wrong="https://github.com/$MOCK_EXPECT_REPOSITORY/actions/runs/$MOCK_EXPECT_RUN_ID/attempts/$((MOCK_EXPECT_RUN_ATTEMPT + 1))"
+            jq -n --arg invocation "$wrong" \
+                '[{verificationResult: {signature: {certificate: {runInvocationURI: $invocation}}}}]'
+            ;;
+        unsigned)
+            printf '[]\n'
+            ;;
+        wrong-repo|wrong-workflow|wrong-ref|wrong-commit|self-hosted)
+            # gh attestation verify enforces these identities from the exact
+            # arguments asserted above. Model its rejection of a non-match.
+            exit 1
+            ;;
+        *)
+            echo "Unknown MOCK_ATTESTATION_MODE: $mode" >&2
+            exit 96
+            ;;
+    esac
+    exit 0
+fi
+
+echo "Unexpected mocked gh invocation: $*" >&2
+exit 99

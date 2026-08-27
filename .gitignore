@@ -1,0 +1,5 @@
+.secrets/
+.work/
+dist/
+__pycache__/
+*.pyc

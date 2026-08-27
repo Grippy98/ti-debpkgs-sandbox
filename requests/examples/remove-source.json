@@ -1,0 +1,12 @@
+{
+  "schema": "ti.debpkgs.request/v1",
+  "request_id": "2026-08-28-remove-cc33conf-example",
+  "action": "remove-source",
+  "suite": "trixie",
+  "component": "main",
+  "reason": "Exercise an exact source-version removal in the sandbox",
+  "source": {
+    "name": "cc33conf",
+    "version": "1.7.0.120+git20241031+34e2cf44-1"
+  }
+}

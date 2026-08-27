@@ -1,0 +1,49 @@
+{
+  "schema": "ti.debpkgs.policy/v1",
+  "archive_repository": "Grippy98/ti-debpkgs-sandbox",
+  "publisher": {
+    "workflow": ".github/workflows/publish.yml",
+    "ref": "refs/heads/main"
+  },
+  "producer": {
+    "repository": "Grippy98/ti-debian-repos",
+    "workflow": ".github/workflows/cc33conf-candidate.yml",
+    "allowed_refs": [
+      "refs/heads/codex/cc33conf-candidate"
+    ],
+    "allowed_events": [
+      "push",
+      "workflow_dispatch"
+    ],
+    "require_github_hosted_runner": true
+  },
+  "signing": {
+    "fingerprint": "2F7DEBAA4171752E3B230AE4F51788F503B519B5",
+    "public_key": "archive/keys/sandbox-archive.asc"
+  },
+  "publication_url": "https://grippy98.github.io/ti-debpkgs-sandbox/",
+  "limits": {
+    "candidate_bytes": 2147483648,
+    "payload_files": 256,
+    "snapshot_bytes": 2147483648,
+    "snapshot_expanded_bytes": 10737418240,
+    "snapshot_members": 100000,
+    "snapshot_metadata_bytes": 1048576
+  },
+  "suites": {
+    "trixie": {
+      "changes_distributions": [
+        "trixie",
+        "UNRELEASED"
+      ],
+      "components": [
+        "main"
+      ],
+      "architectures": [
+        "source",
+        "arm64",
+        "all"
+      ]
+    }
+  }
+}
